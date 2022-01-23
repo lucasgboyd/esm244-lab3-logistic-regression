@@ -1,0 +1,272 @@
+---
+title: "Lab 3: Binary Logistic Regression"
+author: "Lucas Boyd"
+date: "1/23/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# attach packages
+library(tidyverse)
+library(palmerpenguins)
+library(GGally)
+library(broom)
+library(jtools)
+library(AICcmodavg)
+library(caret)
+```
+
+## Binary Logistic Regression
+
+#### Explore Data with ggpairs
+
+```{r}
+penguins %>% 
+  select(species, bill_length_mm:sex) %>% 
+  ggpairs(aes(color = species))
+```
+
+#### make a subset of Chinstrap and Adelie
+```{r}
+adelie_chinstrap <- penguins %>% # species is actually a FACTOR, check levels() to see order
+  filter(species %in% c("Adelie", "Chinstrap")) %>% 
+  mutate(species = fct_drop(species)) %>% # R still remembers that gentoo was a factor, so use fct_drop to drop unused levels of a factored variable
+  select(-island, -year) %>% # dropping island and year
+  drop_na()
+```
+
+#### check some trends for variables for these species
+
+```{r}
+ggplot(data = adelie_chinstrap, aes(x = body_mass_g, y = flipper_length_mm)) +
+  geom_point(aes(color = sex)) +
+  facet_wrap(~species)
+
+ggplot(data = adelie_chinstrap, aes(x = body_mass_g, y = bill_length_mm)) +
+  geom_point(aes(color = sex)) +
+  facet_wrap(~species)
+```
+
+#### Let's do a logistic regression 
+use glm() 
+```{r}
+f1 <- species ~ body_mass_g + flipper_length_mm + sex # storing a function!
+
+ad_chin_blr1 <- glm(formula = f1,
+                    data = adelie_chinstrap,
+                    family = "binomial")
+```
+#### Look at the results
+```{r}
+summary(ad_chin_blr1) # when you look at levels(), this tells you which one is the reference level (first)
+
+blr1_tidy <- tidy(ad_chin_blr1)
+```
+#### Checking out the data again with ggplot
+```{r}
+ggplot(data = adelie_chinstrap, aes(x = species, y = body_mass_g)) +
+         geom_jitter(aes(color = sex))
+
+ggplot(data = adelie_chinstrap, aes(x = species, y = flipper_length_mm)) +
+         geom_jitter(aes(color = sex))
+```
+
+```{r}
+blr1_fitted <- ad_chin_blr1 %>% 
+  augment(type.predict = "response") # predict based on our model, the probability of adelie or chinstrap
+# type.predict = "response" turns it into a probability
+```
+
+#### Plot the probability based on flipper length to check how well the variable is predicting
+Plotting the data that was fitted with augment
+```{r}
+ggplot(data = blr1_fitted, aes(x = flipper_length_mm, y = .fitted)) +
+  geom_point(aes(color = sex, shape = species)) +
+  geom_smooth(aes(color = sex), se = FALSE) +
+  labs(y = "Probability that penguin is Chinstrap")
+```
+
+#### Visualize model outcomes using "jtools::effect_plot()"
+This allows up to just plug the regression in and visualize
+```{r}
+effect_plot(ad_chin_blr1, 
+            pred = flipper_length_mm,
+            interval = TRUE,
+            y.label = "probability of chinstrap")
+
+# flipper length has this effect on the probability of being chinstrap
+
+effect_plot(ad_chin_blr1, 
+            pred = body_mass_g,
+            interval = TRUE,
+            y.label = "probability of chinstrap")
+```
+
+#### Predict species based on new values
+
+What is the probability that a female penguin with a 3410g body mass and a flipper length of 192mm will be chinstrap?
+
+Use the predict() function
+```{r}
+ex1 <- predict(ad_chin_blr1,
+               data.frame(sex = "female", 
+                          body_mass_g = 3410,
+                          flipper_length_mm = 192),
+               type = "response") # make sure it's a probability and not log odds
+```
+We found new data
+```{r}
+new_df <- data.frame(
+  sex = c("male", "male", "female"),
+  body_mass_g = c(3298, 4100, 3600),
+  flipper_length_mm = c(212, 185, 180)
+)
+
+# now use our blr model to predict the species of each of these new penguins
+ex2 <- predict(ad_chin_blr1, # model
+               new_df, # new data 
+               type = "response") # output is probability
+```
+
+#### Creating a new model
+
+```{r}
+f2 <- species ~ bill_length_mm + body_mass_g
+
+ad_chin_blr2 <- glm(formula = f2,
+                    data = adelie_chinstrap,
+                    family = "binomial")
+
+summary(ad_chin_blr2)
+
+```
+#### Let's plot it to see how the model looks
+
+```{r}
+ggplot(data = adelie_chinstrap, aes(y = body_mass_g, x = bill_length_mm)) +
+  geom_point(aes(color = species)) 
+# this model is looking much better
+```
+#### Going back to effect_plot
+```{r}
+effect_plot(ad_chin_blr2, 
+            pred = bill_length_mm,
+            interval = TRUE,
+            y.label = "probability of chinstrap")
+# this is lookin nice, a good logistic curve
+
+effect_plot(ad_chin_blr2, 
+            pred = body_mass_g,
+            interval = TRUE,
+            y.label = "probability of chinstrap")
+# also pretty good 
+```
+
+### Model Selection
+
+#### AIC
+```{r}
+aictab(list(ad_chin_blr1, ad_chin_blr2))
+# model 2 is waaaaay better based on AIC
+```
+
+### 10-fold cross validation
+Using prediction accuracy as our metric.
+#### setting up the df for x-validation
+```{r}
+set.seed(123)
+
+n_folds <- 10 
+folds <- rep(1:n_folds, length.out = nrow(adelie_chinstrap)) # vector of 1-10 repeating
+
+ad_chin_kfold <- adelie_chinstrap %>% 
+  mutate(fold = sample(folds, size = n(), replace = FALSE)) # adding a column with a randomized value based on the folds vector we just created
+
+```
+
+#### storing our function for prediction accuracy 
+```{r}
+pred_acc <- function(x, y) {
+  accurate <- ifelse(x == y, 1, 0) # 1 = match, 0 = wrong
+  return(mean(accurate, na.rm = TRUE)) # returning the mean of the accuracy score (0 or 1), this will give us a prediction accuracy score (between 0 and 1)
+}
+```
+
+```{r}
+results_df <- data.frame() # storing an empty dataframe that we'll fill in
+
+for(i in 1:n_folds) {
+  kfold_test <- ad_chin_kfold %>% # creating a test df for a randomly assigned group of i
+    filter(fold == i)
+  kfold_train <- ad_chin_kfold %>% # creating a training df for everything else not in group i
+    filter(folds != i)
+  
+  kfold_blr1 <- glm(f1, # running glm() on the training df we just created for model 1
+                    data = kfold_train, 
+                    family = "binomial")
+  kfold_blr2 <- glm(f2, # running glm() on the training df we just created for model 2
+                    data = kfold_train, 
+                    family = "binomial")
+  
+  kfold_pred <- kfold_test %>% 
+    mutate(blr1 = predict(kfold_blr1, # columns that predicts the probability of species based on model
+                          kfold_test, 
+                          type = "response",),
+           blr2 = predict(kfold_blr2, 
+                          kfold_test,
+                          type = "response")) %>% 
+    mutate(pred1 = ifelse(blr1 > .50, "Chinstrap", "Adelie"), # adding columns that predict the species if the predicted probability is greater than 50%
+           pred2 = ifelse(blr2 > .50, "Chinstrap", "Adelie"))
+  
+  kfold_accuracy <- kfold_pred %>% # running our columns through our created function to see if they match actual species
+    summarize(blr1_acc = pred_acc(species, pred1),
+              blr2_acc = pred_acc(species, pred2))
+  
+  results_df <- bind_rows(results_df, kfold_accuracy) # binding together the results rows for each model
+}
+
+results_df %>% # finding the mean across all folds to assess overall model success rate
+  summarize(blr1_acc = mean(blr1_acc),
+            blr2_acc = mean(blr2_acc))
+```
+
+### Use caret package to automate kfold cross validation
+
+```{r}
+set.seed(123)
+
+# setting this up before we train the model
+tr_ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10) # repeatedcv is repeated cross validation, number is number of folds
+
+# train the model
+model1 <- train(f1, data = adelie_chinstrap,
+                method = "glm",
+                family = "binomial",
+                trControl = tr_ctrl)
+
+model1 
+
+# train the other model
+
+model2 <- train(f2, data = adelie_chinstrap,
+                method = "glm",
+                family = "binomial",
+                trControl = tr_ctrl)
+
+model2 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
